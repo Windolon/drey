@@ -209,6 +209,13 @@ mod tests {
     }
 
     #[test]
+    fn empty() {
+        let mut tokens = tokenize("");
+        assert_eq!(tokens.next(), None);
+        assert_eq!(tokens.next(), None);
+    }
+
+    #[test]
     fn unexpected_symbol() {
         assert_stream_eq!(
             "ä",
