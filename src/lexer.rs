@@ -133,6 +133,18 @@ impl Lexer {
         }
     }
 
+    fn error_on_line(
+        &self,
+        kind: LexerErrorKind,
+        start_column: usize,
+    ) -> Option<Result<Token, LexerError>> {
+        Some(Err(LexerError::new(
+            kind,
+            Position::new(self.line, start_column),
+            Position::new(self.line, self.column - 1),
+        )))
+    }
+
     fn next_token(&mut self) -> Option<Result<Token, LexerError>> {
         match self.current_byte()? {
             b'a'..=b'z' | b'A'..=b'Z' | b'_' => self.idents_and_keywords(),
@@ -154,11 +166,7 @@ impl Lexer {
                 let columns = offender.graphemes(true).count();
                 self.column += columns;
 
-                Some(Err(LexerError::new(
-                    UnexpectedSymbol(offender),
-                    Position::new(self.line, start_column),
-                    Position::new(self.line, self.column - 1),
-                )))
+                self.error_on_line(UnexpectedSymbol(offender), start_column)
             }
         }
     }
