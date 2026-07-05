@@ -225,13 +225,8 @@ mod tests {
 
     #[test]
     fn unexpected_symbol() {
-        assert_stream_eq!(
-            "ä",
-            error(UnexpectedSymbol("ä".to_string()), (1, 1), (1, 1))
-        );
-        assert_stream_eq!(
-            "äöü",
-            error(UnexpectedSymbol("äöü".to_string()), (1, 1), (1, 3))
-        );
+        assert_stream_eq!("ä", error(UnexpectedSymbol("ä".into()), (1, 1), (1, 1)));
+        assert_stream_eq!("äöü", error(UnexpectedSymbol("äöü".into()), (1, 1), (1, 3)));
+    }
     }
 }
