@@ -228,5 +228,4 @@ mod tests {
         assert_stream_eq!("ä", error(UnexpectedSymbol("ä".into()), (1, 1), (1, 1)));
         assert_stream_eq!("äöü", error(UnexpectedSymbol("äöü".into()), (1, 1), (1, 3)));
     }
-    }
 }
