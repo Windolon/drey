@@ -149,30 +149,32 @@ impl Lexer {
         match self.current_byte()? {
             b'a'..=b'z' | b'A'..=b'Z' | b'_' => self.idents_and_keywords(),
 
-            // Unexpected byte. Advance until the next lexable byte and report the offender to the
-            // user.
-            _ => {
-                let start_index = self.index;
-                let start_column = self.column;
-
-                while let Some(byte) = self.next_byte(false) {
-                    // TODO: figure out the boundary for lexable bytes
-                    if byte < 128 {
-                        break;
-                    }
-                }
-
-                let offender = self.string_from(start_index);
-                let columns = offender.graphemes(true).count();
-                self.column += columns;
-
-                self.error_on_line(UnexpectedSymbol(offender), start_column)
-            }
+            // Unexpected byte. Advance until the next lexable byte and
+            // report the offender to the user.
+            _ => self.unexpected(),
         }
     }
 
     fn idents_and_keywords(&mut self) -> Option<Result<Token, LexerError>> {
         todo!()
+    }
+
+    fn unexpected(&mut self) -> Option<Result<Token, LexerError>> {
+        let start_index = self.index;
+        let start_column = self.column;
+
+        while let Some(byte) = self.next_byte(false) {
+            // TODO: figure out the boundary for lexable bytes
+            if byte < 128 {
+                break;
+            }
+        }
+
+        let offender = self.string_from(start_index);
+        let columns = offender.graphemes(true).count();
+        self.column += columns;
+
+        self.error_on_line(UnexpectedSymbol(offender), start_column)
     }
 }
 
