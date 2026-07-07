@@ -5,12 +5,15 @@ use unicode_segmentation::UnicodeSegmentation;
 
 /// Represents a cursor position in source code.
 ///
-/// Column numbers are counted by grapheme clusters following
-/// [UAX #29](https://www.unicode.org/reports/tr29/) rules. Therefore, the character "é", despite
-/// consisting of two Unicode scalar values, counts as one cluster and spans one column. If we had
-/// counted by the number of `char`s that make up this character instead, we would have got a column
-/// count of 2, which is incorrect.
-/// Read more [here](https://doc.rust-lang.org/stable/std/primitive.char.html#representation).
+/// Column numbers are counted by grapheme clusters following [UAX #29] rules.
+/// Therefore, the character "é", despite consisting of two Unicode scalar values,
+/// counts as one cluster and spans one column. If we had counted by
+/// the number of `char`s that make up this character instead, we would have got
+/// a column count of 2, which is incorrect. More about this in the
+/// [`char` primitive type docs][doc].
+///
+/// [UAX #29]: https://www.unicode.org/reports/tr29/
+/// [doc]: https://doc.rust-lang.org/stable/std/primitive.char.html#representation
 #[derive(Debug, PartialEq)]
 pub struct Position {
     /// The line number of this position.
@@ -40,8 +43,8 @@ impl Token {
 
 /// Describes the kind of [`Token`] and possibly the value that it contains.
 ///
-/// For example, an `Ident` token contains a `String` value (its name), but a `Base` token has no
-/// value.
+/// For example, an `Ident` token contains a `String` value (its name),
+/// but a `Base` token has no value.
 #[derive(Debug, PartialEq)]
 #[non_exhaustive]
 pub enum TokenKind {
@@ -69,8 +72,8 @@ pub enum LexerErrorKind {
     UnexpectedSymbol(String),
 }
 
-/// Creates an iterator that produces [`Token`]s wrapped behind [`Result`]s from an input source
-/// string.
+/// Creates an iterator that produces [`Token`]s wrapped behind
+/// [`Result`]s from an input source string.
 pub fn tokenize(source: &str) -> impl Iterator<Item = Result<Token, LexerError>> {
     let mut lexer = Lexer::new(source);
     std::iter::from_fn(move || lexer.next_token())
