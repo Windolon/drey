@@ -254,7 +254,7 @@ pub enum LexerErrorKind {
 
 /// Creates an iterator that produces [`Token`]s wrapped behind
 /// [`Result`]s from an input source string.
-pub fn tokenize(source: &str) -> impl Iterator<Item = Result<Token, LexerError>> {
+pub fn lex(source: &str) -> impl Iterator<Item = Result<Token, LexerError>> {
     let mut lexer = Lexer::new(source);
     std::iter::from_fn(move || lexer.next_token())
 }
@@ -702,7 +702,7 @@ mod tests {
                 $token: expr
             ),+
         ) => {{
-            let vec_source: Vec<_> = tokenize($source).collect();
+            let vec_source: Vec<_> = lex($source).collect();
             assert_eq!(vec_source, vec![$($token,)+]);
         }};
     }
@@ -733,7 +733,7 @@ mod tests {
 
     #[test]
     fn empty() {
-        let mut tokens = tokenize("");
+        let mut tokens = lex("");
         assert_eq!(tokens.next(), None);
         assert_eq!(tokens.next(), None);
     }
