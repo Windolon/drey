@@ -28,14 +28,19 @@ impl Position {
     }
 }
 
+/// Parsed tokens - the main output of [`lex()`].
 #[derive(Debug, PartialEq)]
 pub struct Token {
+    /// The kind of this token.
     pub kind: TokenKind,
+    /// Line and column numbers that this token starts at.
     pub start: Position,
+    /// Line and column numbers that this token ends at.
     pub end: Position,
 }
 
 impl Token {
+    /// Creates a new `Token` with the specified parameters.
     pub fn new(kind: TokenKind, start: Position, end: Position) -> Self {
         Self { kind, start, end }
     }
@@ -230,6 +235,10 @@ pub enum TokenKind {
     At,
 }
 
+/// An error returned by [`lex()`] when a part of the input string cannot be lexed.
+///
+/// After reporting the problematic part of the string via this error,
+/// the lexer continues down the input and does not terminate.
 #[derive(Debug, PartialEq)]
 pub struct LexerError {
     kind: LexerErrorKind,
