@@ -505,9 +505,9 @@ impl Lexer {
 
             Some(b'/') => todo!(),
 
-            Some(b'=') => self.div_eq_or_attr_close(DivEq),
+            Some(b'=') => self.slash_token_with_two_columns(DivEq),
 
-            Some(b'>') => self.div_eq_or_attr_close(AttrClose),
+            Some(b'>') => self.slash_token_with_two_columns(AttrClose),
 
             _ => {
                 let start_column = self.column;
@@ -517,7 +517,10 @@ impl Lexer {
         }
     }
 
-    fn div_eq_or_attr_close(&mut self, kind: TokenKind) -> Option<Result<Token, LexerError>> {
+    fn slash_token_with_two_columns(
+        &mut self,
+        kind: TokenKind,
+    ) -> Option<Result<Token, LexerError>> {
         let start_column = self.column;
         self.next_byte(false);
         self.column += 2;
