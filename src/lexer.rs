@@ -3,17 +3,6 @@ use TokenKind::*;
 
 use unicode_segmentation::UnicodeSegmentation;
 
-/// Represents a cursor position in source code.
-///
-/// Column numbers are counted by grapheme clusters following [UAX #29] rules.
-/// Therefore, the character "é", despite consisting of two Unicode scalar values,
-/// counts as one cluster and spans one column. If we had counted by
-/// the number of `char`s that make up this character instead, we would have got
-/// a column count of 2, which is incorrect. More about this in the
-/// [`char` primitive type docs][doc].
-///
-/// [UAX #29]: https://www.unicode.org/reports/tr29/
-/// [doc]: https://doc.rust-lang.org/stable/std/primitive.char.html#representation
 #[derive(Debug, PartialEq)]
 pub struct Position {
     /// The line number of this position.
@@ -28,14 +17,11 @@ impl Position {
     }
 }
 
-/// Parsed tokens - the main output of [`lex()`].
 #[derive(Debug, PartialEq)]
 pub struct Token {
     /// The kind of this token.
     pub kind: TokenKind,
-    /// Line and column numbers that this token starts at.
     pub start: Position,
-    /// Line and column numbers that this token ends at.
     pub end: Position,
 }
 
@@ -235,10 +221,6 @@ pub enum TokenKind {
     At,
 }
 
-/// An error returned by [`lex()`] when a part of the input string cannot be lexed.
-///
-/// After reporting the problematic part of the string via this error,
-/// the lexer continues down the input and does not terminate.
 #[derive(Debug, PartialEq)]
 pub struct LexerError {
     kind: LexerErrorKind,
@@ -261,8 +243,6 @@ pub enum LexerErrorKind {
     InvalidToken(String),
 }
 
-/// Creates an iterator that produces [`Token`]s wrapped behind
-/// [`Result`]s from an input source string.
 pub fn lex(source: &str) -> impl Iterator<Item = Result<Token, LexerError>> {
     let mut lexer = Lexer::new(source);
     std::iter::from_fn(move || lexer.next_token())
