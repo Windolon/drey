@@ -1,10 +1,12 @@
 use LexerErrorKind::*;
 use TokenKind::*;
 
-use unicode_segmentation::UnicodeSegmentation;
+use smol_str::SmolStr;
+use std::str::CharIndices;
 
 #[derive(Debug, PartialEq)]
 pub struct Position {
+    pub byte_pos: usize,
     /// The line number of this position.
     pub line: usize,
     /// The column number of this position.
@@ -12,10 +14,16 @@ pub struct Position {
 }
 
 impl Position {
-    fn new(line: usize, column: usize) -> Self {
-        Self { line, column }
+    fn new(byte_pos: usize, line: usize, column: usize) -> Self {
+        Self {
+            byte_pos,
+            line,
+            column,
+        }
     }
 }
+
+pub type LResult = Result<Token, LexerError>;
 
 #[derive(Debug, PartialEq)]
 pub struct Token {
@@ -40,7 +48,7 @@ impl Token {
 #[non_exhaustive]
 pub enum TokenKind {
     /// An identifier.
-    Ident(String),
+    Ident(SmolStr),
 
     /// The `base` keyword.
     Base,
@@ -219,6 +227,9 @@ pub enum TokenKind {
     Scope,
     /// `@`
     At,
+
+    /// End of file.
+    Eof,
 }
 
 #[derive(Debug, PartialEq)]
@@ -237,173 +248,311 @@ impl LexerError {
 /// Describes the kind of [`LexerError`] and provides additional information if any.
 #[derive(Debug, PartialEq)]
 pub enum LexerErrorKind {
-    /// One or more unexpected symbols were encountered.
-    UnexpectedSymbol(String),
+    /// An unexpected character was encountered.
+    UnexpectedChar(char),
     /// An invalid token was encountered.
-    InvalidToken(String),
+    InvalidToken(SmolStr),
 }
 
-pub fn lex(source: &str) -> impl Iterator<Item = Result<Token, LexerError>> {
-    let mut lexer = Lexer::new(source);
-    std::iter::from_fn(move || lexer.next_token())
-}
-
-struct Lexer {
-    source: Vec<u8>,
-    index: usize,
+pub struct Lexer<'src> {
+    src: &'src str,
+    char_indices: CharIndices<'src>,
+    byte_pos: usize,
     line: usize,
     column: usize,
 }
 
-impl Lexer {
-    fn new(source: &str) -> Self {
+impl<'src> Lexer<'src> {
+    pub fn new(src: &'src str) -> Self {
         Self {
-            source: source.as_bytes().to_owned(),
-            index: 0,
+            src,
+            char_indices: src.char_indices(),
+            byte_pos: 0,
             line: 1,
-            column: 1,
+            column: 0,
         }
     }
 
-    fn current_byte(&self) -> Option<u8> {
-        self.source.get(self.index).copied()
+    fn next_char(&mut self) -> Option<char> {
+        let (i, c) = self.char_indices.next()?;
+        self.column += 1;
+        self.byte_pos = i;
+        Some(c)
     }
 
-    fn peek_byte(&self) -> Option<u8> {
-        self.source.get(self.index + 1).copied()
+    fn peek_first(&self) -> Option<char> {
+        let (_, c) = self.char_indices.clone().next()?;
+        Some(c)
     }
 
-    fn previous_byte(&self) -> Option<u8> {
-        self.source.get(self.index - 1).copied()
+    fn peek_second(&self) -> Option<char> {
+        let mut iter = self.char_indices.clone();
+        // rustc_lexer claims that calling consecutive next()s
+        // optimises better than nth(), so let's follow that.
+        iter.next();
+        let (_, c) = iter.next()?;
+        Some(c)
     }
 
-    fn next_byte(&mut self, count_columns: bool) -> Option<u8> {
-        if count_columns {
-            self.column += 1;
-        }
-        self.index += 1;
-        self.current_byte()
+    /// Returns the byte position of the next char from `char_indices`
+    /// without advancing the iterator. If iteration has completed, returns
+    /// the length in bytes of `src`.
+    fn peek_byte_pos(&self) -> usize {
+        self.char_indices
+            .clone()
+            .next()
+            .unwrap_or((self.src.len(), '_'))
+            .0
     }
 
-    fn advance_line(&mut self) {
-        self.index += 1;
-        self.line += 1;
-        self.column = 1;
+    fn str_from_end(&self, start: usize) -> SmolStr {
+        // It is an internal error if the indices ever go out of bounds,
+        // so we index into the &str directly instead of
+        // wrapping the action under get().
+        SmolStr::new(&self.src[start..=self.byte_pos])
     }
 
-    fn string_from(&self, start_index: usize) -> String {
-        // You should be banned from scripting if you somehow wrote bogus bytes
-        String::from_utf8_lossy(
-            self.source
-                .get(start_index..self.index)
-                .expect("range should be in bounds of source vector"),
-        )
-        .into_owned()
+    fn str_from_end_safe(&self, start: usize) -> SmolStr {
+        // In situations like "chloë", "ë" spans byte positions 4 to 5.
+        // If we call str_from_end() while the "cursor" sits on the "ë",
+        // the str will be malformed since it is made from bytes 0 to 4.
+        //
+        // Use str_from_end() if you are sure situations like the above
+        // will never happen (and do not want the safety check overhead).
+        //
+        // TODO: make str_from_end() unsafe?
+        let end = self.peek_byte_pos();
+        SmolStr::new(&self.src[start..end])
     }
 
-    fn advance_bytes_until_newline_or_eof(&mut self) {
-        while let Some(byte) = self.next_byte(false) {
-            if byte == b'\n' {
-                break;
+    fn token_on_line(&self, kind: TokenKind, byte_pos: usize, column: usize) -> LResult {
+        Ok(Token::new(
+            kind,
+            Position::new(byte_pos, self.line, column),
+            Position::new(self.byte_pos, self.line, self.column),
+        ))
+    }
+
+    fn error_on_line(&self, kind: LexerErrorKind, byte_pos: usize, column: usize) -> LResult {
+        Err(LexerError::new(
+            kind,
+            Position::new(byte_pos, self.line, column),
+            Position::new(self.byte_pos, self.line, self.column),
+        ))
+    }
+
+    fn one_char_token(&self, kind: TokenKind) -> LResult {
+        self.token_on_line(kind, self.byte_pos, self.column)
+    }
+
+    fn two_char_token(&mut self, kind: TokenKind) -> LResult {
+        let byte_pos = self.byte_pos;
+        let column = self.column;
+        self.next_char();
+        self.token_on_line(kind, byte_pos, column)
+    }
+
+    fn three_char_token(&mut self, kind: TokenKind) -> LResult {
+        let byte_pos = self.byte_pos;
+        let column = self.column;
+        self.next_char();
+        self.next_char();
+        self.token_on_line(kind, byte_pos, column)
+    }
+
+    pub fn collect_any(&mut self) -> Vec<LResult> {
+        let mut vec = Vec::new();
+        let mut pushed_eof = false;
+        while !pushed_eof {
+            let result = self.next_token();
+            if let Ok(token) = &result {
+                pushed_eof = token.kind == Eof;
             }
+            vec.push(result);
         }
+        vec
     }
 
-    fn create_on_line(
-        &self,
-        kind: TokenKind,
-        start_column: usize,
-    ) -> Option<Result<Token, LexerError>> {
-        Some(Ok(Token::new(
-            kind,
-            Position::new(self.line, start_column),
-            Position::new(self.line, self.column - 1),
-        )))
-    }
+    pub fn next_token(&mut self) -> LResult {
+        let Some(this_char) = self.next_char() else {
+            // We want the Eof token to point at the very last char
+            // in the source string. If that last char is a newline,
+            // then the byte position points at it, but
+            // line & column info point at the start of the next line.
+            if self.column == 0 {
+                self.column = 1;
+            }
+            return Ok(Token::new(
+                Eof,
+                Position::new(self.byte_pos, self.line, self.column),
+                Position::new(self.byte_pos, self.line, self.column),
+            ));
+        };
 
-    fn error_on_line(
-        &self,
-        kind: LexerErrorKind,
-        start_column: usize,
-    ) -> Option<Result<Token, LexerError>> {
-        Some(Err(LexerError::new(
-            kind,
-            Position::new(self.line, start_column),
-            Position::new(self.line, self.column - 1),
-        )))
-    }
+        match this_char {
+            c if c.is_ascii_alphabetic() || c == '_' => self.idents_and_keywords(),
 
-    fn next_token(&mut self) -> Option<Result<Token, LexerError>> {
-        match self.current_byte()? {
-            b'a'..=b'z' | b'A'..=b'Z' | b'_' => self.idents_and_keywords(),
-
-            // /, /=, line comment and block comment.
-            b'/' => self.slash(),
+            // Line comment, block comment, /=, /> and /.
+            '/' => match self.peek_first() {
+                Some('/') => todo!(),
+                Some('*') => todo!(),
+                Some('=') => self.two_char_token(DivEq),
+                Some('>') => self.two_char_token(AttrClose),
+                _ => self.one_char_token(Div),
+            },
 
             // Line comment beginning with a #.
-            b'#' => todo!(),
+            '#' => todo!(),
 
-            // @ and verbatim strings.
-            b'@' => self.at(),
+            // Verbatim strings and @.
+            '@' => match self.peek_first() {
+                Some('"') => todo!(),
+                _ => self.one_char_token(At),
+            },
 
-            // +, +=, ++,
-            // -, -= and --.
-            b'+' | b'-' => self.plus_or_minus(),
+            // +=, ++ and +.
+            '+' => match self.peek_first() {
+                Some('=') => self.two_char_token(PlusEq),
+                Some('+') => self.two_char_token(PlusPlus),
+                _ => self.one_char_token(Plus),
+            },
 
-            // *, %, !, =,
-            // *=, %=, != and ==.
-            b'*' | b'%' | b'!' | b'=' => self.symbols_with_eq_only(),
+            // -=, -- and -.
+            '-' => match self.peek_first() {
+                Some('=') => self.two_char_token(MinusEq),
+                Some('-') => self.two_char_token(MinusMinus),
+                _ => self.one_char_token(Minus),
+            },
 
-            // &, |, :,
-            // &&, || and ::.
-            b'&' | b'|' | b':' => self.symbols_with_repeat_only(),
+            // *= and *.
+            '*' => match self.peek_first() {
+                Some('=') => self.two_char_token(MultEq),
+                _ => self.one_char_token(Mult),
+            },
 
-            // <, <<, <-, <=, <=> and </.
-            b'<' => self.less_than(),
+            // %= and %.
+            '%' => match self.peek_first() {
+                Some('=') => self.two_char_token(ModEq),
+                _ => self.one_char_token(Mod),
+            },
 
-            // >, >>, >>>, >= and />.
-            b'>' => self.greater_than(),
+            // != and !.
+            '!' => match self.peek_first() {
+                Some('=') => self.two_char_token(Ne),
+                _ => self.one_char_token(Not),
+            },
 
-            // "." and "...".
-            b'.' => self.dot(),
+            // == and =.
+            '=' => match self.peek_first() {
+                Some('=') => self.two_char_token(EqEq),
+                _ => self.one_char_token(Eq),
+            },
+
+            // && and &.
+            '&' => match self.peek_first() {
+                Some('&') => self.two_char_token(And),
+                _ => self.one_char_token(BitAnd),
+            },
+
+            // || and |.
+            '|' => match self.peek_first() {
+                Some('|') => self.two_char_token(Or),
+                _ => self.one_char_token(BitOr),
+            },
+
+            // :: and :.
+            ':' => match self.peek_first() {
+                Some(':') => self.two_char_token(Scope),
+                _ => self.one_char_token(Colon),
+            },
+
+            // <=>, <=, <<, <-, </ and <.
+            '<' => match self.peek_first() {
+                Some('=') => match self.peek_second() {
+                    Some('>') => self.three_char_token(Spaceship),
+                    _ => self.two_char_token(Le),
+                },
+                Some('<') => self.two_char_token(ShiftLeft),
+                Some('-') => self.two_char_token(Newslot),
+                Some('/') => self.two_char_token(AttrOpen),
+                _ => self.one_char_token(Lt),
+            },
+
+            // >>>, >>, >= and >.
+            '>' => match self.peek_first() {
+                Some('>') => match self.peek_second() {
+                    Some('>') => self.three_char_token(UShiftRight),
+                    _ => self.two_char_token(ShiftRight),
+                },
+                Some('=') => self.two_char_token(Ge),
+                _ => self.one_char_token(Gt),
+            },
+
+            // "..." and ".".
+            '.' => match self.peek_first() {
+                Some('.') => match self.peek_second() {
+                    Some('.') => self.three_char_token(DotDotDot),
+                    _ => {
+                        // ".." is an invalid token and results in a lexer error.
+                        // https://github.com/albertodemichelis/squirrel/blob/f9267f2f2/squirrel/sqlexer.cpp#L226
+                        let byte_pos = self.byte_pos;
+                        let column = self.column;
+                        self.next_char();
+                        // Don't even need to slice src here.
+                        self.error_on_line(InvalidToken("..".into()), byte_pos, column)
+                    }
+                },
+                _ => self.one_char_token(Dot),
+            },
 
             // Whitespaces.
             // Exact definition for whitespaces in Squirrel can be found at
             // https://github.com/albertodemichelis/squirrel/blob/f9267f2f2/squirrel/sqlexer.cpp#L133
-            b' ' | b'\t' | b'\r' => self.whitespace(),
+            ' ' | '\t' | '\r' => self.whitespace(),
 
             // Newline.
-            b'\n' => self.newline(),
+            '\n' => self.newline(),
 
             // Tokens consisting of only one symbol.
-            b'^' => self.single_symbol_token(BitXor),
-            b'~' => self.single_symbol_token(BitNot),
-            b',' => self.single_symbol_token(Comma),
-            b'?' => self.single_symbol_token(Question),
-            b'(' => self.single_symbol_token(ParenOpen),
-            b')' => self.single_symbol_token(ParenClose),
-            b'[' => self.single_symbol_token(SquareOpen),
-            b']' => self.single_symbol_token(SquareClose),
-            b'{' => self.single_symbol_token(BraceOpen),
-            b'}' => self.single_symbol_token(BraceClose),
-            b';' => self.single_symbol_token(Semicolon),
+            '^' => self.one_char_token(BitXor),
+            '~' => self.one_char_token(BitNot),
+            ',' => self.one_char_token(Comma),
+            '?' => self.one_char_token(Question),
+            '(' => self.one_char_token(ParenOpen),
+            ')' => self.one_char_token(ParenClose),
+            '[' => self.one_char_token(SquareOpen),
+            ']' => self.one_char_token(SquareClose),
+            '{' => self.one_char_token(BraceOpen),
+            '}' => self.one_char_token(BraceClose),
+            ';' => self.one_char_token(Semicolon),
 
-            // Unexpected byte. Advance until the next lexable byte and
-            // report the offender to the user.
-            _ => self.unexpected(),
+            // Unexpected char. Report this offending char to the user.
+            _ => {
+                let start_byte_pos = self.byte_pos;
+                let end_byte_pos = self.peek_byte_pos() - 1;
+                Err(LexerError::new(
+                    UnexpectedChar(this_char),
+                    Position::new(start_byte_pos, self.line, self.column),
+                    Position::new(end_byte_pos, self.line, self.column),
+                ))
+            }
         }
     }
 
-    fn idents_and_keywords(&mut self) -> Option<Result<Token, LexerError>> {
-        let start_index = self.index;
-        let start_column = self.column;
+    fn idents_and_keywords(&mut self) -> LResult {
+        let byte_pos = self.byte_pos;
+        let column = self.column;
 
-        while let Some(b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_') = self.next_byte(true) {}
+        while let Some(c) = self.peek_first() {
+            if !c.is_ascii_alphanumeric() && c != '_' {
+                break;
+            }
+            self.next_char();
+        }
 
-        let value = self.string_from(start_index);
-
-        // This keyword lookup is from Inko, and it is likely as efficient as it gets without being
-        // too complex.
+        let value = self.str_from_end(byte_pos);
+        // This keyword lookup is from Inko, and it is likely as efficient as it gets
+        // without being too complex.
         let kind = match value.len() {
             2 => match value.as_str() {
                 "do" => Do,
@@ -470,216 +619,15 @@ impl Lexer {
             _ => Ident(value),
         };
 
-        self.create_on_line(kind, start_column)
+        self.token_on_line(kind, byte_pos, column)
     }
 
-    fn single_symbol_token(&mut self, kind: TokenKind) -> Option<Result<Token, LexerError>> {
-        let start_column = self.column;
-        self.next_byte(true);
-        self.create_on_line(kind, start_column)
-    }
-
-    fn slash(&mut self) -> Option<Result<Token, LexerError>> {
-        match self.next_byte(false) {
-            Some(b'*') => todo!(),
-
-            Some(b'/') => todo!(),
-
-            Some(b'=') => self.slash_token_with_two_columns(DivEq),
-
-            Some(b'>') => self.slash_token_with_two_columns(AttrClose),
-
-            _ => {
-                let start_column = self.column;
-                self.column += 1;
-                self.create_on_line(Div, start_column)
-            }
-        }
-    }
-
-    fn slash_token_with_two_columns(
-        &mut self,
-        kind: TokenKind,
-    ) -> Option<Result<Token, LexerError>> {
-        let start_column = self.column;
-        self.next_byte(false);
-        self.column += 2;
-        self.create_on_line(kind, start_column)
-    }
-
-    fn at(&mut self) -> Option<Result<Token, LexerError>> {
-        let start_column = self.column;
-
-        match self.next_byte(false) {
-            Some(b'"') => todo!(),
-            _ => {
-                self.column += 1;
-                self.create_on_line(At, start_column)
-            }
-        }
-    }
-
-    fn plus_or_minus(&mut self) -> Option<Result<Token, LexerError>> {
-        let start_column = self.column;
-
-        let kind = match self.current_byte()? {
-            b'+' => match self.next_byte(true) {
-                Some(b'=') => PlusEq,
-                Some(b'+') => PlusPlus,
-                _ => Plus,
-            },
-
-            b'-' => match self.next_byte(true) {
-                Some(b'=') => MinusEq,
-                Some(b'-') => MinusMinus,
-                _ => Minus,
-            },
-
-            _ => {
-                unreachable!("plus_or_minus() called to lex tokens that do not start with + or -")
-            }
-        };
-
-        if kind != Plus && kind != Minus {
-            self.next_byte(true);
-        }
-
-        self.create_on_line(kind, start_column)
-    }
-
-    fn symbols_with_eq_only(&mut self) -> Option<Result<Token, LexerError>> {
-        let start_column = self.column;
-        let is_eq_kind = matches!(self.next_byte(true), Some(b'='));
-
-        let kind = match self.previous_byte() {
-            Some(b'*') if is_eq_kind => MultEq,
-            Some(b'*') => Mult,
-            Some(b'%') if is_eq_kind => ModEq,
-            Some(b'%') => Mod,
-            Some(b'!') if is_eq_kind => Ne,
-            Some(b'!') => Not,
-            Some(b'=') if is_eq_kind => EqEq,
-            Some(b'=') => Eq,
-            _ => unreachable!(
-                "symbols_with_eq_only() called to lex tokens that do not start with *, %, ! or ="
-            ),
-        };
-
-        if is_eq_kind {
-            self.next_byte(true);
-        }
-
-        self.create_on_line(kind, start_column)
-    }
-
-    fn symbols_with_repeat_only(&mut self) -> Option<Result<Token, LexerError>> {
-        let start_byte = self.current_byte();
-        let start_column = self.column;
-        let is_repeat = self.next_byte(true) == start_byte;
-
-        let kind = match start_byte {
-            Some(b'&') if is_repeat => And,
-            Some(b'&') => BitAnd,
-            Some(b'|') if is_repeat => Or,
-            Some(b'|') => BitOr,
-            Some(b':') if is_repeat => Scope,
-            Some(b':') => Colon,
-            _ => unreachable!(
-                "symbols_with_repeat_only() called to lex tokens that do not start with &, | or :"
-            ),
-        };
-
-        if is_repeat {
-            self.next_byte(true);
-        }
-
-        self.create_on_line(kind, start_column)
-    }
-
-    fn less_than(&mut self) -> Option<Result<Token, LexerError>> {
-        let start_column = self.column;
-
-        let kind = match self.next_byte(true) {
-            Some(b'<') => ShiftLeft,
-            Some(b'-') => Newslot,
-            Some(b'/') => AttrOpen,
-            Some(b'=') => match self.next_byte(true) {
-                Some(b'>') => Spaceship,
-                _ => Le,
-            },
-            _ => Lt,
-        };
-
-        if kind != Lt && kind != Le {
-            self.next_byte(true);
-        }
-
-        self.create_on_line(kind, start_column)
-    }
-
-    fn greater_than(&mut self) -> Option<Result<Token, LexerError>> {
-        let start_column = self.column;
-
-        let kind = match self.next_byte(true) {
-            Some(b'=') => Ge,
-            Some(b'>') => match self.next_byte(true) {
-                Some(b'>') => UShiftRight,
-                _ => ShiftRight,
-            },
-            _ => Gt,
-        };
-
-        if kind != Gt && kind != ShiftRight {
-            self.next_byte(true);
-        }
-
-        self.create_on_line(kind, start_column)
-    }
-
-    fn dot(&mut self) -> Option<Result<Token, LexerError>> {
-        let start_column = self.column;
-
-        let kind = match self.next_byte(true) {
-            Some(b'.') => match self.next_byte(true) {
-                Some(b'.') => DotDotDot,
-                // ".." is an invalid token and results in a lexer error.
-                // https://github.com/albertodemichelis/squirrel/blob/f9267f2f2/squirrel/sqlexer.cpp#L226
-                _ => return self.error_on_line(InvalidToken("..".into()), start_column),
-            },
-            _ => Dot,
-        };
-
-        if kind != Dot {
-            self.next_byte(true);
-        }
-
-        self.create_on_line(kind, start_column)
-    }
-
-    fn whitespace(&mut self) -> Option<Result<Token, LexerError>> {
+    fn whitespace(&mut self) -> LResult {
         todo!()
     }
 
-    fn newline(&mut self) -> Option<Result<Token, LexerError>> {
+    fn newline(&mut self) -> LResult {
         todo!()
-    }
-
-    fn unexpected(&mut self) -> Option<Result<Token, LexerError>> {
-        let start_index = self.index;
-        let start_column = self.column;
-
-        while let Some(byte) = self.next_byte(false) {
-            // TODO: figure out the boundary for lexable bytes
-            if byte < 128 {
-                break;
-            }
-        }
-
-        let offender = self.string_from(start_index);
-        let columns = offender.graphemes(true).count();
-        self.column += columns;
-
-        self.error_on_line(UnexpectedSymbol(offender), start_column)
     }
 }
 
@@ -689,184 +637,205 @@ mod tests {
 
     macro_rules! assert_stream_eq {
         (
-            $source: expr,
+            $src: expr,
             $(
-                $token: expr
+                $result: expr
             ),+
         ) => {{
-            let vec_source: Vec<_> = lex($source).collect();
-            assert_eq!(vec_source, vec![$($token,)+]);
+            let vec_source: Vec<_> = Lexer::new($src).collect_any();
+            assert_eq!(vec_source, vec![$($result,)+]);
         }};
     }
 
-    fn token(
-        kind: TokenKind,
-        start: (usize, usize),
-        end: (usize, usize),
-    ) -> Result<Token, LexerError> {
+    fn token(kind: TokenKind, start: (usize, usize, usize), end: (usize, usize, usize)) -> LResult {
         Ok(Token::new(
             kind,
-            Position::new(start.0, start.1),
-            Position::new(end.0, end.1),
+            Position::new(start.0, start.1, start.2),
+            Position::new(end.0, end.1, end.2),
         ))
+    }
+
+    fn eof(byte_pos: usize, line: usize, column: usize) -> LResult {
+        token(Eof, (byte_pos, line, column), (byte_pos, line, column))
     }
 
     fn error(
         kind: LexerErrorKind,
-        start: (usize, usize),
-        end: (usize, usize),
-    ) -> Result<Token, LexerError> {
+        start: (usize, usize, usize),
+        end: (usize, usize, usize),
+    ) -> LResult {
         Err(LexerError::new(
             kind,
-            Position::new(start.0, start.1),
-            Position::new(end.0, end.1),
+            Position::new(start.0, start.1, start.2),
+            Position::new(end.0, end.1, end.2),
         ))
     }
 
     #[test]
     fn empty() {
-        let mut tokens = lex("");
-        assert_eq!(tokens.next(), None);
-        assert_eq!(tokens.next(), None);
+        let mut lexer = Lexer::new("");
+        assert_eq!(lexer.next_token(), eof(0, 1, 1));
+        assert_eq!(lexer.next_token(), eof(0, 1, 1));
     }
 
     #[test]
     #[rustfmt::skip]
     fn idents() {
         // Unused variable
-        assert_stream_eq!("_", token(Ident("_".into()), (1, 1), (1, 1)));
-        assert_stream_eq!("f", token(Ident("f".into()), (1, 1), (1, 1)));
-        assert_stream_eq!("F", token(Ident("F".into()), (1, 1), (1, 1)));
-        assert_stream_eq!("f1", token(Ident("f1".into()), (1, 1), (1, 2)));
-        assert_stream_eq!("_1", token(Ident("_1".into()), (1, 1), (1, 2)));
-        assert_stream_eq!("__", token(Ident("__".into()), (1, 1), (1, 2)));
+        assert_stream_eq!("_", token(Ident("_".into()), (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
+        assert_stream_eq!("f", token(Ident("f".into()), (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
+        assert_stream_eq!("F", token(Ident("F".into()), (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
+        assert_stream_eq!("f1", token(Ident("f1".into()), (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
+        assert_stream_eq!("_1", token(Ident("_1".into()), (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
+        assert_stream_eq!("__", token(Ident("__".into()), (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
         // General variable
-        assert_stream_eq!("foo", token(Ident("foo".into()), (1, 1), (1, 3)));
-        assert_stream_eq!("__fo", token(Ident("__fo".into()), (1, 1), (1, 4)));
-        assert_stream_eq!("__2fo", token(Ident("__2fo".into()), (1, 1), (1, 5)));
+        assert_stream_eq!("foo", token(Ident("foo".into()), (0, 1, 1), (2, 1, 3)), eof(2, 1, 3));
+        assert_stream_eq!("__fo", token(Ident("__fo".into()), (0, 1, 1), (3, 1, 4)), eof(3, 1, 4));
+        assert_stream_eq!("__2fo", token(Ident("__2fo".into()), (0, 1, 1), (4, 1, 5)), eof(4, 1, 5));
         // PascalCase
-        assert_stream_eq!("FooBar", token(Ident("FooBar".into()), (1, 1), (1, 6)));
-        assert_stream_eq!("fOo2BaR", token(Ident("fOo2BaR".into()), (1, 1), (1, 7)));
+        assert_stream_eq!("FooBar", token(Ident("FooBar".into()), (0, 1, 1), (5, 1, 6)), eof(5, 1, 6));
+        assert_stream_eq!("fOo2BaR", token(Ident("fOo2BaR".into()), (0, 1, 1), (6, 1, 7)), eof(6, 1, 7));
         // camelCase
-        assert_stream_eq!("fooBarBa", token(Ident("fooBarBa".into()), (1, 1), (1, 8)));
+        assert_stream_eq!("fooBarBa", token(Ident("fooBarBa".into()), (0, 1, 1), (7, 1, 8)), eof(7, 1, 8));
         // SCREAMING_SNAKE_CASE
-        assert_stream_eq!("HALF_LIFE", token(Ident("HALF_LIFE".into()), (1, 1), (1, 9)));
+        assert_stream_eq!("HALF_LIFE", token(Ident("HALF_LIFE".into()), (0, 1, 1), (8, 1, 9)), eof(8, 1, 9));
         // snake_case
-        assert_stream_eq!("portal_two", token(Ident("portal_two".into()), (1, 1), (1, 10)));
+        assert_stream_eq!("portal_two", token(Ident("portal_two".into()), (0, 1, 1), (9, 1, 10)), eof(9, 1, 10));
         // A general script function beginning with "_"
-        assert_stream_eq!("__DumpScope", token(Ident("__DumpScope".into()), (1, 1), (1, 11)));
-        assert_stream_eq!("__0foobarbaz", token(Ident("__0foobarbaz".into()), (1, 1), (1, 12)));
-        assert_stream_eq!("___0123456789", token(Ident("___0123456789".into()), (1, 1), (1, 13)));
+        assert_stream_eq!("__DumpScope", token(Ident("__DumpScope".into()), (0, 1, 1), (10, 1, 11)), eof(10, 1, 11));
+        assert_stream_eq!("__0foobarbaz", token(Ident("__0foobarbaz".into()), (0, 1, 1), (11, 1, 12)), eof(11, 1, 12));
+        assert_stream_eq!("___0123456789", token(Ident("___0123456789".into()), (0, 1, 1), (12, 1, 13)), eof(12, 1, 13));
     }
 
     #[test]
     #[rustfmt::skip]
     fn keywords() {
-        assert_stream_eq!("base", token(Base, (1, 1), (1, 4)));
-        assert_stream_eq!("break", token(Break, (1, 1), (1, 5)));
-        assert_stream_eq!("case", token(Case, (1, 1), (1, 4)));
-        assert_stream_eq!("catch", token(Catch, (1, 1), (1, 5)));
-        assert_stream_eq!("class", token(Class, (1, 1), (1, 5)));
-        assert_stream_eq!("clone", token(Clone, (1, 1), (1, 5)));
-        assert_stream_eq!("const", token(Const, (1, 1), (1, 5)));
-        assert_stream_eq!("constructor", token(Constructor, (1, 1), (1, 11)));
-        assert_stream_eq!("continue", token(Continue, (1, 1), (1, 8)));
-        assert_stream_eq!("default", token(Default, (1, 1), (1, 7)));
-        assert_stream_eq!("delete", token(Delete, (1, 1), (1, 6)));
-        assert_stream_eq!("do", token(Do, (1, 1), (1, 2)));
-        assert_stream_eq!("else", token(Else, (1, 1), (1, 4)));
-        assert_stream_eq!("enum", token(Enum, (1, 1), (1, 4)));
-        assert_stream_eq!("extends", token(Extends, (1, 1), (1, 7)));
-        assert_stream_eq!("false", token(False, (1, 1), (1, 5)));
-        assert_stream_eq!("__FILE__", token(File, (1, 1), (1, 8)));
-        assert_stream_eq!("for", token(For, (1, 1), (1, 3)));
-        assert_stream_eq!("foreach", token(Foreach, (1, 1), (1, 7)));
-        assert_stream_eq!("function", token(Function, (1, 1), (1, 8)));
-        assert_stream_eq!("if", token(If, (1, 1), (1, 2)));
-        assert_stream_eq!("in", token(In, (1, 1), (1, 2)));
-        assert_stream_eq!("instanceof", token(Instanceof, (1, 1), (1, 10)));
-        assert_stream_eq!("__LINE__", token(Line, (1, 1), (1, 8)));
-        assert_stream_eq!("local", token(Local, (1, 1), (1, 5)));
-        assert_stream_eq!("null", token(Null, (1, 1), (1, 4)));
-        assert_stream_eq!("rawcall", token(Rawcall, (1, 1), (1, 7)));
-        assert_stream_eq!("resume", token(Resume, (1, 1), (1, 6)));
-        assert_stream_eq!("return", token(Return, (1, 1), (1, 6)));
-        assert_stream_eq!("static", token(Static, (1, 1), (1, 6)));
-        assert_stream_eq!("switch", token(Switch, (1, 1), (1, 6)));
-        assert_stream_eq!("this", token(This, (1, 1), (1, 4)));
-        assert_stream_eq!("throw", token(Throw, (1, 1), (1, 5)));
-        assert_stream_eq!("true", token(True, (1, 1), (1, 4)));
-        assert_stream_eq!("try", token(Try, (1, 1), (1, 3)));
-        assert_stream_eq!("typeof", token(Typeof, (1, 1), (1, 6)));
-        assert_stream_eq!("while", token(While, (1, 1), (1, 5)));
-        assert_stream_eq!("yield", token(Yield, (1, 1), (1, 5)));
+        assert_stream_eq!("base", token(Base, (0, 1, 1), (3, 1, 4)), eof(3, 1, 4));
+        assert_stream_eq!("break", token(Break, (0, 1, 1), (4, 1, 5)), eof(4, 1, 5));
+        assert_stream_eq!("case", token(Case, (0, 1, 1), (3, 1, 4)), eof(3, 1, 4));
+        assert_stream_eq!("catch", token(Catch, (0, 1, 1), (4, 1, 5)), eof(4, 1, 5));
+        assert_stream_eq!("class", token(Class, (0, 1, 1), (4, 1, 5)), eof(4, 1, 5));
+        assert_stream_eq!("clone", token(Clone, (0, 1, 1), (4, 1, 5)), eof(4, 1, 5));
+        assert_stream_eq!("const", token(Const, (0, 1, 1), (4, 1, 5)), eof(4, 1, 5));
+        assert_stream_eq!("constructor", token(Constructor, (0, 1, 1), (10, 1, 11)), eof(10, 1, 11));
+        assert_stream_eq!("continue", token(Continue, (0, 1, 1), (7, 1, 8)), eof(7, 1, 8));
+        assert_stream_eq!("default", token(Default, (0, 1, 1), (6, 1, 7)), eof(6, 1, 7));
+        assert_stream_eq!("delete", token(Delete, (0, 1, 1), (5, 1, 6)), eof(5, 1, 6));
+        assert_stream_eq!("do", token(Do, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
+        assert_stream_eq!("else", token(Else, (0, 1, 1), (3, 1, 4)), eof(3, 1, 4));
+        assert_stream_eq!("enum", token(Enum, (0, 1, 1), (3, 1, 4)), eof(3, 1, 4));
+        assert_stream_eq!("extends", token(Extends, (0, 1, 1), (6, 1, 7)), eof(6, 1, 7));
+        assert_stream_eq!("false", token(False, (0, 1, 1), (4, 1, 5)), eof(4, 1, 5));
+        assert_stream_eq!("__FILE__", token(File, (0, 1, 1), (7, 1, 8)), eof(7, 1, 8));
+        assert_stream_eq!("for", token(For, (0, 1, 1), (2, 1, 3)), eof(2, 1, 3));
+        assert_stream_eq!("foreach", token(Foreach, (0, 1, 1), (6, 1, 7)), eof(6, 1, 7));
+        assert_stream_eq!("function", token(Function, (0, 1, 1), (7, 1, 8)), eof(7, 1, 8));
+        assert_stream_eq!("if", token(If, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
+        assert_stream_eq!("in", token(In, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
+        assert_stream_eq!("instanceof", token(Instanceof, (0, 1, 1), (9, 1, 10)), eof(9, 1, 10));
+        assert_stream_eq!("__LINE__", token(Line, (0, 1, 1), (7, 1, 8)), eof(7, 1, 8));
+        assert_stream_eq!("local", token(Local, (0, 1, 1), (4, 1, 5)), eof(4, 1, 5));
+        assert_stream_eq!("null", token(Null, (0, 1, 1), (3, 1, 4)), eof(3, 1, 4));
+        assert_stream_eq!("rawcall", token(Rawcall, (0, 1, 1), (6, 1, 7)), eof(6, 1, 7));
+        assert_stream_eq!("resume", token(Resume, (0, 1, 1), (5, 1, 6)), eof(5, 1, 6));
+        assert_stream_eq!("return", token(Return, (0, 1, 1), (5, 1, 6)), eof(5, 1, 6));
+        assert_stream_eq!("static", token(Static, (0, 1, 1), (5, 1, 6)), eof(5, 1, 6));
+        assert_stream_eq!("switch", token(Switch, (0, 1, 1), (5, 1, 6)), eof(5, 1, 6));
+        assert_stream_eq!("this", token(This, (0, 1, 1), (3, 1, 4)), eof(3, 1, 4));
+        assert_stream_eq!("throw", token(Throw, (0, 1, 1), (4, 1, 5)), eof(4, 1, 5));
+        assert_stream_eq!("true", token(True, (0, 1, 1), (3, 1, 4)), eof(3, 1, 4));
+        assert_stream_eq!("try", token(Try, (0, 1, 1), (2, 1, 3)), eof(2, 1, 3));
+        assert_stream_eq!("typeof", token(Typeof, (0, 1, 1), (5, 1, 6)), eof(5, 1, 6));
+        assert_stream_eq!("while", token(While, (0, 1, 1), (4, 1, 5)), eof(4, 1, 5));
+        assert_stream_eq!("yield", token(Yield, (0, 1, 1), (4, 1, 5)), eof(4, 1, 5));
     }
 
     #[test]
     fn symbols() {
-        assert_stream_eq!("+", token(Plus, (1, 1), (1, 1)));
-        assert_stream_eq!("+=", token(PlusEq, (1, 1), (1, 2)));
-        assert_stream_eq!("++", token(PlusPlus, (1, 1), (1, 2)));
-        assert_stream_eq!("-", token(Minus, (1, 1), (1, 1)));
-        assert_stream_eq!("-=", token(MinusEq, (1, 1), (1, 2)));
-        assert_stream_eq!("--", token(MinusMinus, (1, 1), (1, 2)));
-        assert_stream_eq!("*", token(Mult, (1, 1), (1, 1)));
-        assert_stream_eq!("*=", token(MultEq, (1, 1), (1, 2)));
-        assert_stream_eq!("/", token(Div, (1, 1), (1, 1)));
-        assert_stream_eq!("/=", token(DivEq, (1, 1), (1, 2)));
-        assert_stream_eq!("%", token(Mod, (1, 1), (1, 1)));
-        assert_stream_eq!("%=", token(ModEq, (1, 1), (1, 2)));
+        assert_stream_eq!("+", token(Plus, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
+        assert_stream_eq!("+=", token(PlusEq, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
+        assert_stream_eq!("++", token(PlusPlus, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
+        assert_stream_eq!("-", token(Minus, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
+        assert_stream_eq!("-=", token(MinusEq, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
+        assert_stream_eq!("--", token(MinusMinus, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
+        assert_stream_eq!("*", token(Mult, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
+        assert_stream_eq!("*=", token(MultEq, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
+        assert_stream_eq!("/", token(Div, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
+        assert_stream_eq!("/=", token(DivEq, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
+        assert_stream_eq!("%", token(Mod, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
+        assert_stream_eq!("%=", token(ModEq, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
 
-        assert_stream_eq!("&", token(BitAnd, (1, 1), (1, 1)));
-        assert_stream_eq!("|", token(BitOr, (1, 1), (1, 1)));
-        assert_stream_eq!("^", token(BitXor, (1, 1), (1, 1)));
-        assert_stream_eq!("~", token(BitNot, (1, 1), (1, 1)));
+        assert_stream_eq!("&", token(BitAnd, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
+        assert_stream_eq!("|", token(BitOr, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
+        assert_stream_eq!("^", token(BitXor, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
+        assert_stream_eq!("~", token(BitNot, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
 
-        assert_stream_eq!("&&", token(And, (1, 1), (1, 2)));
-        assert_stream_eq!("||", token(Or, (1, 1), (1, 2)));
-        assert_stream_eq!("!", token(Not, (1, 1), (1, 1)));
+        assert_stream_eq!("&&", token(And, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
+        assert_stream_eq!("||", token(Or, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
+        assert_stream_eq!("!", token(Not, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
 
-        assert_stream_eq!("<<", token(ShiftLeft, (1, 1), (1, 2)));
-        assert_stream_eq!(">>", token(ShiftRight, (1, 1), (1, 2)));
-        assert_stream_eq!(">>>", token(UShiftRight, (1, 1), (1, 3)));
+        assert_stream_eq!("<<", token(ShiftLeft, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
+        assert_stream_eq!(">>", token(ShiftRight, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
+        assert_stream_eq!(
+            ">>>",
+            token(UShiftRight, (0, 1, 1), (2, 1, 3)),
+            eof(2, 1, 3)
+        );
 
-        assert_stream_eq!("<", token(Lt, (1, 1), (1, 1)));
-        assert_stream_eq!("<=", token(Le, (1, 1), (1, 2)));
-        assert_stream_eq!(">", token(Gt, (1, 1), (1, 1)));
-        assert_stream_eq!(">=", token(Ge, (1, 1), (1, 2)));
-        assert_stream_eq!("==", token(EqEq, (1, 1), (1, 2)));
-        assert_stream_eq!("!=", token(Ne, (1, 1), (1, 2)));
-        assert_stream_eq!("<=>", token(Spaceship, (1, 1), (1, 3)));
+        assert_stream_eq!("<", token(Lt, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
+        assert_stream_eq!("<=", token(Le, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
+        assert_stream_eq!(">", token(Gt, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
+        assert_stream_eq!(">=", token(Ge, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
+        assert_stream_eq!("==", token(EqEq, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
+        assert_stream_eq!("!=", token(Ne, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
+        assert_stream_eq!("<=>", token(Spaceship, (0, 1, 1), (2, 1, 3)), eof(2, 1, 3));
 
-        assert_stream_eq!("=", token(Eq, (1, 1), (1, 1)));
-        assert_stream_eq!("<-", token(Newslot, (1, 1), (1, 2)));
-        assert_stream_eq!(",", token(Comma, (1, 1), (1, 1)));
-        assert_stream_eq!("?", token(Question, (1, 1), (1, 1)));
+        assert_stream_eq!("=", token(Eq, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
+        assert_stream_eq!("<-", token(Newslot, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
+        assert_stream_eq!(",", token(Comma, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
+        assert_stream_eq!("?", token(Question, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
 
-        assert_stream_eq!("(", token(ParenOpen, (1, 1), (1, 1)));
-        assert_stream_eq!(")", token(ParenClose, (1, 1), (1, 1)));
-        assert_stream_eq!("[", token(SquareOpen, (1, 1), (1, 1)));
-        assert_stream_eq!("]", token(SquareClose, (1, 1), (1, 1)));
-        assert_stream_eq!("{", token(BraceOpen, (1, 1), (1, 1)));
-        assert_stream_eq!("}", token(BraceClose, (1, 1), (1, 1)));
-        assert_stream_eq!("</", token(AttrOpen, (1, 1), (1, 2)));
-        assert_stream_eq!("/>", token(AttrClose, (1, 1), (1, 2)));
-        assert_stream_eq!(".", token(Dot, (1, 1), (1, 1)));
-        assert_stream_eq!("...", token(DotDotDot, (1, 1), (1, 3)));
-        assert_stream_eq!(":", token(Colon, (1, 1), (1, 1)));
-        assert_stream_eq!(";", token(Semicolon, (1, 1), (1, 1)));
-        assert_stream_eq!("::", token(Scope, (1, 1), (1, 2)));
-        assert_stream_eq!("@", token(At, (1, 1), (1, 1)));
+        assert_stream_eq!("(", token(ParenOpen, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
+        assert_stream_eq!(")", token(ParenClose, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
+        assert_stream_eq!("[", token(SquareOpen, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
+        assert_stream_eq!("]", token(SquareClose, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
+        assert_stream_eq!("{", token(BraceOpen, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
+        assert_stream_eq!("}", token(BraceClose, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
+        assert_stream_eq!("</", token(AttrOpen, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
+        assert_stream_eq!("/>", token(AttrClose, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
+        assert_stream_eq!(".", token(Dot, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
+        assert_stream_eq!("...", token(DotDotDot, (0, 1, 1), (2, 1, 3)), eof(2, 1, 3));
+        assert_stream_eq!(":", token(Colon, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
+        assert_stream_eq!(";", token(Semicolon, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
+        assert_stream_eq!("::", token(Scope, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
+        assert_stream_eq!("@", token(At, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
     }
 
     #[test]
     fn unexpected_symbol() {
-        assert_stream_eq!("ä", error(UnexpectedSymbol("ä".into()), (1, 1), (1, 1)));
-        assert_stream_eq!("äöü", error(UnexpectedSymbol("äöü".into()), (1, 1), (1, 3)));
+        assert_stream_eq!(
+            "ä",
+            error(UnexpectedChar('ä'), (0, 1, 1), (1, 1, 1)),
+            eof(0, 1, 1)
+        );
+        assert_stream_eq!(
+            "ä松🐿",
+            // 2 bytes
+            error(UnexpectedChar('ä'), (0, 1, 1), (1, 1, 1)),
+            // 3 bytes
+            error(UnexpectedChar('松'), (2, 1, 2), (4, 1, 2)),
+            // 4 bytes
+            error(UnexpectedChar('🐿'), (5, 1, 3), (8, 1, 3)),
+            eof(5, 1, 3)
+        );
     }
 
     #[test]
     fn invalid_token() {
-        assert_stream_eq!("..", error(InvalidToken("..".into()), (1, 1), (1, 2)));
+        assert_stream_eq!(
+            "..",
+            error(InvalidToken("..".into()), (0, 1, 1), (1, 1, 2)),
+            eof(1, 1, 2)
+        );
     }
 }

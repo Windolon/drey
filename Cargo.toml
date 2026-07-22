@@ -5,4 +5,4 @@ edition = "2024"
 license = "MPL-2.0"
 
 [dependencies]
-unicode-segmentation = "1.13.3"
+smol_str = "0.3.6"
