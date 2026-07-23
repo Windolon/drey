@@ -49,6 +49,8 @@ impl Token {
 pub enum TokenKind {
     /// An identifier.
     Ident(SmolStr),
+    /// A line comment beginning with either `//` or `#`.
+    LineComment(SmolStr),
 
     /// The `base` keyword.
     Base,
@@ -341,6 +343,15 @@ impl<'src> Lexer<'src> {
         ))
     }
 
+    fn token_on_line_safe(&self, kind: TokenKind, byte_pos: usize, column: usize) -> LResult {
+        let end = self.peek_byte_pos() - 1;
+        Ok(Token::new(
+            kind,
+            Position::new(byte_pos, self.line, column),
+            Position::new(end, self.line, self.column),
+        ))
+    }
+
     fn one_char_token(&self, kind: TokenKind) -> LResult {
         self.token_on_line(kind, self.byte_pos, self.column)
     }
@@ -401,7 +412,7 @@ impl<'src> Lexer<'src> {
 
             // Line comment, block comment, /=, /> and /.
             '/' => match self.peek_first() {
-                Some('/') => todo!(),
+                Some('/') => self.line_comment(),
                 Some('*') => todo!(),
                 Some('=') => self.two_char_token(DivEq),
                 Some('>') => self.two_char_token(AttrClose),
@@ -409,7 +420,7 @@ impl<'src> Lexer<'src> {
             },
 
             // Line comment beginning with a #.
-            '#' => todo!(),
+            '#' => self.line_comment(),
 
             // Verbatim strings and @.
             '@' => match self.peek_first() {
@@ -629,6 +640,21 @@ impl<'src> Lexer<'src> {
         self.token_on_line(kind, byte_pos, column)
     }
 
+    fn line_comment(&mut self) -> LResult {
+        let byte_pos = self.byte_pos;
+        let column = self.column;
+
+        while let Some(c) = self.peek_first() {
+            if c == '\n' {
+                break;
+            }
+            self.next_char();
+        }
+
+        let text = self.str_from_end_safe(byte_pos);
+        self.token_on_line_safe(LineComment(text), byte_pos, column)
+    }
+
     fn whitespace(&mut self) -> LResult {
         todo!()
     }
@@ -840,6 +866,40 @@ mod tests {
             "..",
             error(InvalidToken("..".into()), (0, 1, 1), (1, 1, 2)),
             eof(1, 1, 2, 1)
+        );
+    }
+
+    #[test]
+    fn line_comments() {
+        assert_stream_eq!(
+            "//",
+            token(LineComment("//".into()), (0, 1, 1), (1, 1, 2)),
+            eof(1, 1, 2, 1)
+        );
+        assert_stream_eq!(
+            "// comment",
+            token(LineComment("// comment".into()), (0, 1, 1), (9, 1, 10)),
+            eof(9, 1, 10, 9)
+        );
+        assert_stream_eq!(
+            "// chloë",
+            token(LineComment("// chloë".into()), (0, 1, 1), (8, 1, 8)),
+            eof(7, 1, 8, 8)
+        );
+        assert_stream_eq!(
+            "#",
+            token(LineComment("#".into()), (0, 1, 1), (0, 1, 1)),
+            eof(0, 1, 1, 0)
+        );
+        assert_stream_eq!(
+            "# comment",
+            token(LineComment("# comment".into()), (0, 1, 1), (8, 1, 9)),
+            eof(8, 1, 9, 8)
+        );
+        assert_stream_eq!(
+            "# chloë",
+            token(LineComment("# chloë".into()), (0, 1, 1), (7, 1, 7)),
+            eof(6, 1, 7, 7)
         );
     }
 }
