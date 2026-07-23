@@ -307,44 +307,35 @@ impl<'src> Lexer<'src> {
             .0
     }
 
-    fn str_from_end(&self, start: usize) -> SmolStr {
+    fn str_from_end(&self, start: usize, may_extend_last_char: bool) -> SmolStr {
         // It is an internal error if the indices ever go out of bounds,
         // so we index into the &str directly instead of
         // wrapping the action under get().
-        SmolStr::new(&self.src[start..=self.byte_pos])
-    }
-
-    fn str_from_end_safe(&self, start: usize) -> SmolStr {
+        //
         // In situations like "chloë", "ë" spans byte positions 4 to 5.
         // If we call str_from_end() while the "cursor" sits on the "ë",
         // the str will be malformed since it is made from bytes 0 to 4.
-        //
-        // Use str_from_end() if you are sure situations like the above
-        // will never happen (and do not want the safety check overhead).
-        //
-        // TODO: make str_from_end() unsafe?
-        let end = self.peek_byte_pos();
-        SmolStr::new(&self.src[start..end])
+        // The may_extend_last_char bool is here to account for this.
+        let end = if may_extend_last_char {
+            self.peek_byte_pos() - 1
+        } else {
+            self.byte_pos
+        };
+        SmolStr::new(&self.src[start..=end])
     }
 
-    fn token_on_line(&self, kind: TokenKind, byte_pos: usize, column: usize) -> LResult {
-        Ok(Token::new(
-            kind,
-            Position::new(byte_pos, self.line, column),
-            Position::new(self.byte_pos, self.line, self.column),
-        ))
-    }
-
-    fn error_on_line(&self, kind: LexerErrorKind, byte_pos: usize, column: usize) -> LResult {
-        Err(LexerError::new(
-            kind,
-            Position::new(byte_pos, self.line, column),
-            Position::new(self.byte_pos, self.line, self.column),
-        ))
-    }
-
-    fn token_on_line_safe(&self, kind: TokenKind, byte_pos: usize, column: usize) -> LResult {
-        let end = self.peek_byte_pos() - 1;
+    fn token_on_line(
+        &self,
+        kind: TokenKind,
+        byte_pos: usize,
+        column: usize,
+        may_extend_last_char: bool,
+    ) -> LResult {
+        let end = if may_extend_last_char {
+            self.peek_byte_pos() - 1
+        } else {
+            self.byte_pos
+        };
         Ok(Token::new(
             kind,
             Position::new(byte_pos, self.line, column),
@@ -352,23 +343,42 @@ impl<'src> Lexer<'src> {
         ))
     }
 
-    fn one_char_token(&self, kind: TokenKind) -> LResult {
-        self.token_on_line(kind, self.byte_pos, self.column)
+    fn error_on_line(
+        &self,
+        kind: LexerErrorKind,
+        byte_pos: usize,
+        column: usize,
+        may_extend_last_char: bool,
+    ) -> LResult {
+        let end = if may_extend_last_char {
+            self.peek_byte_pos() - 1
+        } else {
+            self.byte_pos
+        };
+        Err(LexerError::new(
+            kind,
+            Position::new(byte_pos, self.line, column),
+            Position::new(end, self.line, self.column),
+        ))
     }
 
-    fn two_char_token(&mut self, kind: TokenKind) -> LResult {
+    fn one_byte_token(&self, kind: TokenKind) -> LResult {
+        self.token_on_line(kind, self.byte_pos, self.column, false)
+    }
+
+    fn two_byte_token(&mut self, kind: TokenKind) -> LResult {
         let byte_pos = self.byte_pos;
         let column = self.column;
         self.next_char();
-        self.token_on_line(kind, byte_pos, column)
+        self.token_on_line(kind, byte_pos, column, false)
     }
 
-    fn three_char_token(&mut self, kind: TokenKind) -> LResult {
+    fn three_byte_token(&mut self, kind: TokenKind) -> LResult {
         let byte_pos = self.byte_pos;
         let column = self.column;
         self.next_char();
         self.next_char();
-        self.token_on_line(kind, byte_pos, column)
+        self.token_on_line(kind, byte_pos, column, false)
     }
 
     pub fn collect_any(&mut self) -> Vec<LResult> {
@@ -414,9 +424,9 @@ impl<'src> Lexer<'src> {
             '/' => match self.peek_first() {
                 Some('/') => self.line_comment(),
                 Some('*') => todo!(),
-                Some('=') => self.two_char_token(DivEq),
-                Some('>') => self.two_char_token(AttrClose),
-                _ => self.one_char_token(Div),
+                Some('=') => self.two_byte_token(DivEq),
+                Some('>') => self.two_byte_token(AttrClose),
+                _ => self.one_byte_token(Div),
             },
 
             // Line comment beginning with a #.
@@ -425,91 +435,91 @@ impl<'src> Lexer<'src> {
             // Verbatim strings and @.
             '@' => match self.peek_first() {
                 Some('"') => todo!(),
-                _ => self.one_char_token(At),
+                _ => self.one_byte_token(At),
             },
 
             // +=, ++ and +.
             '+' => match self.peek_first() {
-                Some('=') => self.two_char_token(PlusEq),
-                Some('+') => self.two_char_token(PlusPlus),
-                _ => self.one_char_token(Plus),
+                Some('=') => self.two_byte_token(PlusEq),
+                Some('+') => self.two_byte_token(PlusPlus),
+                _ => self.one_byte_token(Plus),
             },
 
             // -=, -- and -.
             '-' => match self.peek_first() {
-                Some('=') => self.two_char_token(MinusEq),
-                Some('-') => self.two_char_token(MinusMinus),
-                _ => self.one_char_token(Minus),
+                Some('=') => self.two_byte_token(MinusEq),
+                Some('-') => self.two_byte_token(MinusMinus),
+                _ => self.one_byte_token(Minus),
             },
 
             // *= and *.
             '*' => match self.peek_first() {
-                Some('=') => self.two_char_token(MultEq),
-                _ => self.one_char_token(Mult),
+                Some('=') => self.two_byte_token(MultEq),
+                _ => self.one_byte_token(Mult),
             },
 
             // %= and %.
             '%' => match self.peek_first() {
-                Some('=') => self.two_char_token(ModEq),
-                _ => self.one_char_token(Mod),
+                Some('=') => self.two_byte_token(ModEq),
+                _ => self.one_byte_token(Mod),
             },
 
             // != and !.
             '!' => match self.peek_first() {
-                Some('=') => self.two_char_token(Ne),
-                _ => self.one_char_token(Not),
+                Some('=') => self.two_byte_token(Ne),
+                _ => self.one_byte_token(Not),
             },
 
             // == and =.
             '=' => match self.peek_first() {
-                Some('=') => self.two_char_token(EqEq),
-                _ => self.one_char_token(Eq),
+                Some('=') => self.two_byte_token(EqEq),
+                _ => self.one_byte_token(Eq),
             },
 
             // && and &.
             '&' => match self.peek_first() {
-                Some('&') => self.two_char_token(And),
-                _ => self.one_char_token(BitAnd),
+                Some('&') => self.two_byte_token(And),
+                _ => self.one_byte_token(BitAnd),
             },
 
             // || and |.
             '|' => match self.peek_first() {
-                Some('|') => self.two_char_token(Or),
-                _ => self.one_char_token(BitOr),
+                Some('|') => self.two_byte_token(Or),
+                _ => self.one_byte_token(BitOr),
             },
 
             // :: and :.
             ':' => match self.peek_first() {
-                Some(':') => self.two_char_token(Scope),
-                _ => self.one_char_token(Colon),
+                Some(':') => self.two_byte_token(Scope),
+                _ => self.one_byte_token(Colon),
             },
 
             // <=>, <=, <<, <-, </ and <.
             '<' => match self.peek_first() {
                 Some('=') => match self.peek_second() {
-                    Some('>') => self.three_char_token(Spaceship),
-                    _ => self.two_char_token(Le),
+                    Some('>') => self.three_byte_token(Spaceship),
+                    _ => self.two_byte_token(Le),
                 },
-                Some('<') => self.two_char_token(ShiftLeft),
-                Some('-') => self.two_char_token(Newslot),
-                Some('/') => self.two_char_token(AttrOpen),
-                _ => self.one_char_token(Lt),
+                Some('<') => self.two_byte_token(ShiftLeft),
+                Some('-') => self.two_byte_token(Newslot),
+                Some('/') => self.two_byte_token(AttrOpen),
+                _ => self.one_byte_token(Lt),
             },
 
             // >>>, >>, >= and >.
             '>' => match self.peek_first() {
                 Some('>') => match self.peek_second() {
-                    Some('>') => self.three_char_token(UShiftRight),
-                    _ => self.two_char_token(ShiftRight),
+                    Some('>') => self.three_byte_token(UShiftRight),
+                    _ => self.two_byte_token(ShiftRight),
                 },
-                Some('=') => self.two_char_token(Ge),
-                _ => self.one_char_token(Gt),
+                Some('=') => self.two_byte_token(Ge),
+                _ => self.one_byte_token(Gt),
             },
 
             // "..." and ".".
             '.' => match self.peek_first() {
                 Some('.') => match self.peek_second() {
-                    Some('.') => self.three_char_token(DotDotDot),
+                    Some('.') => self.three_byte_token(DotDotDot),
                     _ => {
                         // ".." is an invalid token and results in a lexer error.
                         // https://github.com/albertodemichelis/squirrel/blob/f9267f2f2/squirrel/sqlexer.cpp#L226
@@ -517,10 +527,10 @@ impl<'src> Lexer<'src> {
                         let column = self.column;
                         self.next_char();
                         // Don't even need to slice src here.
-                        self.error_on_line(InvalidToken("..".into()), byte_pos, column)
+                        self.error_on_line(InvalidToken("..".into()), byte_pos, column, false)
                     }
                 },
-                _ => self.one_char_token(Dot),
+                _ => self.one_byte_token(Dot),
             },
 
             // Whitespaces.
@@ -532,28 +542,20 @@ impl<'src> Lexer<'src> {
             '\n' => self.newline(),
 
             // Tokens consisting of only one symbol.
-            '^' => self.one_char_token(BitXor),
-            '~' => self.one_char_token(BitNot),
-            ',' => self.one_char_token(Comma),
-            '?' => self.one_char_token(Question),
-            '(' => self.one_char_token(ParenOpen),
-            ')' => self.one_char_token(ParenClose),
-            '[' => self.one_char_token(SquareOpen),
-            ']' => self.one_char_token(SquareClose),
-            '{' => self.one_char_token(BraceOpen),
-            '}' => self.one_char_token(BraceClose),
-            ';' => self.one_char_token(Semicolon),
+            '^' => self.one_byte_token(BitXor),
+            '~' => self.one_byte_token(BitNot),
+            ',' => self.one_byte_token(Comma),
+            '?' => self.one_byte_token(Question),
+            '(' => self.one_byte_token(ParenOpen),
+            ')' => self.one_byte_token(ParenClose),
+            '[' => self.one_byte_token(SquareOpen),
+            ']' => self.one_byte_token(SquareClose),
+            '{' => self.one_byte_token(BraceOpen),
+            '}' => self.one_byte_token(BraceClose),
+            ';' => self.one_byte_token(Semicolon),
 
             // Unexpected char. Report this offending char to the user.
-            _ => {
-                let start_byte_pos = self.byte_pos;
-                let end_byte_pos = self.peek_byte_pos() - 1;
-                Err(LexerError::new(
-                    UnexpectedChar(this_char),
-                    Position::new(start_byte_pos, self.line, self.column),
-                    Position::new(end_byte_pos, self.line, self.column),
-                ))
-            }
+            _ => self.error_on_line(UnexpectedChar(this_char), self.byte_pos, self.column, true),
         }
     }
 
@@ -568,7 +570,7 @@ impl<'src> Lexer<'src> {
             self.next_char();
         }
 
-        let value = self.str_from_end(byte_pos);
+        let value = self.str_from_end(byte_pos, false);
         // This keyword lookup is from Inko, and it is likely as efficient as it gets
         // without being too complex.
         let kind = match value.len() {
@@ -637,7 +639,7 @@ impl<'src> Lexer<'src> {
             _ => Ident(value),
         };
 
-        self.token_on_line(kind, byte_pos, column)
+        self.token_on_line(kind, byte_pos, column, false)
     }
 
     fn line_comment(&mut self) -> LResult {
@@ -651,8 +653,8 @@ impl<'src> Lexer<'src> {
             self.next_char();
         }
 
-        let text = self.str_from_end_safe(byte_pos);
-        self.token_on_line_safe(LineComment(text), byte_pos, column)
+        let text = self.str_from_end(byte_pos, true);
+        self.token_on_line(LineComment(text), byte_pos, column, true)
     }
 
     fn whitespace(&mut self) -> LResult {
