@@ -374,18 +374,25 @@ impl<'src> Lexer<'src> {
     }
 
     pub fn next_token(&mut self) -> LResult {
+        // We want the Eof token to point at the very last char
+        // in the source string. If that last char is a newline,
+        // then the byte position points at it, but
+        // line & column info point at the start of the next line.
         let Some(this_char) = self.next_char() else {
-            // We want the Eof token to point at the very last char
-            // in the source string. If that last char is a newline,
-            // then the byte position points at it, but
-            // line & column info point at the start of the next line.
             if self.column == 0 {
                 self.column = 1;
             }
+
+            let end = if self.src.is_empty() {
+                0
+            } else {
+                self.src.len() - 1
+            };
+
             return Ok(Token::new(
                 Eof,
                 Position::new(self.byte_pos, self.line, self.column),
-                Position::new(self.byte_pos, self.line, self.column),
+                Position::new(end, self.line, self.column),
             ));
         };
 
@@ -655,8 +662,8 @@ mod tests {
         ))
     }
 
-    fn eof(byte_pos: usize, line: usize, column: usize) -> LResult {
-        token(Eof, (byte_pos, line, column), (byte_pos, line, column))
+    fn eof(start: usize, line: usize, column: usize, end: usize) -> LResult {
+        token(Eof, (start, line, column), (end, line, column))
     }
 
     fn error(
@@ -674,141 +681,138 @@ mod tests {
     #[test]
     fn empty() {
         let mut lexer = Lexer::new("");
-        assert_eq!(lexer.next_token(), eof(0, 1, 1));
-        assert_eq!(lexer.next_token(), eof(0, 1, 1));
+        assert_eq!(lexer.next_token(), eof(0, 1, 1, 0));
+        assert_eq!(lexer.next_token(), eof(0, 1, 1, 0));
     }
 
     #[test]
     #[rustfmt::skip]
     fn idents() {
         // Unused variable
-        assert_stream_eq!("_", token(Ident("_".into()), (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
-        assert_stream_eq!("f", token(Ident("f".into()), (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
-        assert_stream_eq!("F", token(Ident("F".into()), (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
-        assert_stream_eq!("f1", token(Ident("f1".into()), (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
-        assert_stream_eq!("_1", token(Ident("_1".into()), (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
-        assert_stream_eq!("__", token(Ident("__".into()), (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
+        assert_stream_eq!("_", token(Ident("_".into()), (0, 1, 1), (0, 1, 1)), eof(0, 1, 1, 0));
+        assert_stream_eq!("f", token(Ident("f".into()), (0, 1, 1), (0, 1, 1)), eof(0, 1, 1, 0));
+        assert_stream_eq!("F", token(Ident("F".into()), (0, 1, 1), (0, 1, 1)), eof(0, 1, 1, 0));
+        assert_stream_eq!("f1", token(Ident("f1".into()), (0, 1, 1), (1, 1, 2)), eof(1, 1, 2, 1));
+        assert_stream_eq!("_1", token(Ident("_1".into()), (0, 1, 1), (1, 1, 2)), eof(1, 1, 2, 1));
+        assert_stream_eq!("__", token(Ident("__".into()), (0, 1, 1), (1, 1, 2)), eof(1, 1, 2, 1));
         // General variable
-        assert_stream_eq!("foo", token(Ident("foo".into()), (0, 1, 1), (2, 1, 3)), eof(2, 1, 3));
-        assert_stream_eq!("__fo", token(Ident("__fo".into()), (0, 1, 1), (3, 1, 4)), eof(3, 1, 4));
-        assert_stream_eq!("__2fo", token(Ident("__2fo".into()), (0, 1, 1), (4, 1, 5)), eof(4, 1, 5));
+        assert_stream_eq!("foo", token(Ident("foo".into()), (0, 1, 1), (2, 1, 3)), eof(2, 1, 3, 2));
+        assert_stream_eq!("__fo", token(Ident("__fo".into()), (0, 1, 1), (3, 1, 4)), eof(3, 1, 4, 3));
+        assert_stream_eq!("__2fo", token(Ident("__2fo".into()), (0, 1, 1), (4, 1, 5)), eof(4, 1, 5, 4));
         // PascalCase
-        assert_stream_eq!("FooBar", token(Ident("FooBar".into()), (0, 1, 1), (5, 1, 6)), eof(5, 1, 6));
-        assert_stream_eq!("fOo2BaR", token(Ident("fOo2BaR".into()), (0, 1, 1), (6, 1, 7)), eof(6, 1, 7));
+        assert_stream_eq!("FooBar", token(Ident("FooBar".into()), (0, 1, 1), (5, 1, 6)), eof(5, 1, 6, 5));
+        assert_stream_eq!("fOo2BaR", token(Ident("fOo2BaR".into()), (0, 1, 1), (6, 1, 7)), eof(6, 1, 7, 6));
         // camelCase
-        assert_stream_eq!("fooBarBa", token(Ident("fooBarBa".into()), (0, 1, 1), (7, 1, 8)), eof(7, 1, 8));
+        assert_stream_eq!("fooBarBa", token(Ident("fooBarBa".into()), (0, 1, 1), (7, 1, 8)), eof(7, 1, 8, 7));
         // SCREAMING_SNAKE_CASE
-        assert_stream_eq!("HALF_LIFE", token(Ident("HALF_LIFE".into()), (0, 1, 1), (8, 1, 9)), eof(8, 1, 9));
+        assert_stream_eq!("HALF_LIFE", token(Ident("HALF_LIFE".into()), (0, 1, 1), (8, 1, 9)), eof(8, 1, 9, 8));
         // snake_case
-        assert_stream_eq!("portal_two", token(Ident("portal_two".into()), (0, 1, 1), (9, 1, 10)), eof(9, 1, 10));
+        assert_stream_eq!("portal_two", token(Ident("portal_two".into()), (0, 1, 1), (9, 1, 10)), eof(9, 1, 10, 9));
         // A general script function beginning with "_"
-        assert_stream_eq!("__DumpScope", token(Ident("__DumpScope".into()), (0, 1, 1), (10, 1, 11)), eof(10, 1, 11));
-        assert_stream_eq!("__0foobarbaz", token(Ident("__0foobarbaz".into()), (0, 1, 1), (11, 1, 12)), eof(11, 1, 12));
-        assert_stream_eq!("___0123456789", token(Ident("___0123456789".into()), (0, 1, 1), (12, 1, 13)), eof(12, 1, 13));
+        assert_stream_eq!("__DumpScope", token(Ident("__DumpScope".into()), (0, 1, 1), (10, 1, 11)), eof(10, 1, 11, 10));
+        assert_stream_eq!("__0foobarbaz", token(Ident("__0foobarbaz".into()), (0, 1, 1), (11, 1, 12)), eof(11, 1, 12, 11));
+        assert_stream_eq!("___0123456789", token(Ident("___0123456789".into()), (0, 1, 1), (12, 1, 13)), eof(12, 1, 13, 12));
     }
 
     #[test]
     #[rustfmt::skip]
     fn keywords() {
-        assert_stream_eq!("base", token(Base, (0, 1, 1), (3, 1, 4)), eof(3, 1, 4));
-        assert_stream_eq!("break", token(Break, (0, 1, 1), (4, 1, 5)), eof(4, 1, 5));
-        assert_stream_eq!("case", token(Case, (0, 1, 1), (3, 1, 4)), eof(3, 1, 4));
-        assert_stream_eq!("catch", token(Catch, (0, 1, 1), (4, 1, 5)), eof(4, 1, 5));
-        assert_stream_eq!("class", token(Class, (0, 1, 1), (4, 1, 5)), eof(4, 1, 5));
-        assert_stream_eq!("clone", token(Clone, (0, 1, 1), (4, 1, 5)), eof(4, 1, 5));
-        assert_stream_eq!("const", token(Const, (0, 1, 1), (4, 1, 5)), eof(4, 1, 5));
-        assert_stream_eq!("constructor", token(Constructor, (0, 1, 1), (10, 1, 11)), eof(10, 1, 11));
-        assert_stream_eq!("continue", token(Continue, (0, 1, 1), (7, 1, 8)), eof(7, 1, 8));
-        assert_stream_eq!("default", token(Default, (0, 1, 1), (6, 1, 7)), eof(6, 1, 7));
-        assert_stream_eq!("delete", token(Delete, (0, 1, 1), (5, 1, 6)), eof(5, 1, 6));
-        assert_stream_eq!("do", token(Do, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
-        assert_stream_eq!("else", token(Else, (0, 1, 1), (3, 1, 4)), eof(3, 1, 4));
-        assert_stream_eq!("enum", token(Enum, (0, 1, 1), (3, 1, 4)), eof(3, 1, 4));
-        assert_stream_eq!("extends", token(Extends, (0, 1, 1), (6, 1, 7)), eof(6, 1, 7));
-        assert_stream_eq!("false", token(False, (0, 1, 1), (4, 1, 5)), eof(4, 1, 5));
-        assert_stream_eq!("__FILE__", token(File, (0, 1, 1), (7, 1, 8)), eof(7, 1, 8));
-        assert_stream_eq!("for", token(For, (0, 1, 1), (2, 1, 3)), eof(2, 1, 3));
-        assert_stream_eq!("foreach", token(Foreach, (0, 1, 1), (6, 1, 7)), eof(6, 1, 7));
-        assert_stream_eq!("function", token(Function, (0, 1, 1), (7, 1, 8)), eof(7, 1, 8));
-        assert_stream_eq!("if", token(If, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
-        assert_stream_eq!("in", token(In, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
-        assert_stream_eq!("instanceof", token(Instanceof, (0, 1, 1), (9, 1, 10)), eof(9, 1, 10));
-        assert_stream_eq!("__LINE__", token(Line, (0, 1, 1), (7, 1, 8)), eof(7, 1, 8));
-        assert_stream_eq!("local", token(Local, (0, 1, 1), (4, 1, 5)), eof(4, 1, 5));
-        assert_stream_eq!("null", token(Null, (0, 1, 1), (3, 1, 4)), eof(3, 1, 4));
-        assert_stream_eq!("rawcall", token(Rawcall, (0, 1, 1), (6, 1, 7)), eof(6, 1, 7));
-        assert_stream_eq!("resume", token(Resume, (0, 1, 1), (5, 1, 6)), eof(5, 1, 6));
-        assert_stream_eq!("return", token(Return, (0, 1, 1), (5, 1, 6)), eof(5, 1, 6));
-        assert_stream_eq!("static", token(Static, (0, 1, 1), (5, 1, 6)), eof(5, 1, 6));
-        assert_stream_eq!("switch", token(Switch, (0, 1, 1), (5, 1, 6)), eof(5, 1, 6));
-        assert_stream_eq!("this", token(This, (0, 1, 1), (3, 1, 4)), eof(3, 1, 4));
-        assert_stream_eq!("throw", token(Throw, (0, 1, 1), (4, 1, 5)), eof(4, 1, 5));
-        assert_stream_eq!("true", token(True, (0, 1, 1), (3, 1, 4)), eof(3, 1, 4));
-        assert_stream_eq!("try", token(Try, (0, 1, 1), (2, 1, 3)), eof(2, 1, 3));
-        assert_stream_eq!("typeof", token(Typeof, (0, 1, 1), (5, 1, 6)), eof(5, 1, 6));
-        assert_stream_eq!("while", token(While, (0, 1, 1), (4, 1, 5)), eof(4, 1, 5));
-        assert_stream_eq!("yield", token(Yield, (0, 1, 1), (4, 1, 5)), eof(4, 1, 5));
+        assert_stream_eq!("base", token(Base, (0, 1, 1), (3, 1, 4)), eof(3, 1, 4, 3));
+        assert_stream_eq!("break", token(Break, (0, 1, 1), (4, 1, 5)), eof(4, 1, 5, 4));
+        assert_stream_eq!("case", token(Case, (0, 1, 1), (3, 1, 4)), eof(3, 1, 4, 3));
+        assert_stream_eq!("catch", token(Catch, (0, 1, 1), (4, 1, 5)), eof(4, 1, 5, 4));
+        assert_stream_eq!("class", token(Class, (0, 1, 1), (4, 1, 5)), eof(4, 1, 5, 4));
+        assert_stream_eq!("clone", token(Clone, (0, 1, 1), (4, 1, 5)), eof(4, 1, 5, 4));
+        assert_stream_eq!("const", token(Const, (0, 1, 1), (4, 1, 5)), eof(4, 1, 5, 4));
+        assert_stream_eq!("constructor", token(Constructor, (0, 1, 1), (10, 1, 11)), eof(10, 1, 11, 10));
+        assert_stream_eq!("continue", token(Continue, (0, 1, 1), (7, 1, 8)), eof(7, 1, 8, 7));
+        assert_stream_eq!("default", token(Default, (0, 1, 1), (6, 1, 7)), eof(6, 1, 7, 6));
+        assert_stream_eq!("delete", token(Delete, (0, 1, 1), (5, 1, 6)), eof(5, 1, 6, 5));
+        assert_stream_eq!("do", token(Do, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2, 1));
+        assert_stream_eq!("else", token(Else, (0, 1, 1), (3, 1, 4)), eof(3, 1, 4, 3));
+        assert_stream_eq!("enum", token(Enum, (0, 1, 1), (3, 1, 4)), eof(3, 1, 4, 3));
+        assert_stream_eq!("extends", token(Extends, (0, 1, 1), (6, 1, 7)), eof(6, 1, 7, 6));
+        assert_stream_eq!("false", token(False, (0, 1, 1), (4, 1, 5)), eof(4, 1, 5, 4));
+        assert_stream_eq!("__FILE__", token(File, (0, 1, 1), (7, 1, 8)), eof(7, 1, 8, 7));
+        assert_stream_eq!("for", token(For, (0, 1, 1), (2, 1, 3)), eof(2, 1, 3, 2));
+        assert_stream_eq!("foreach", token(Foreach, (0, 1, 1), (6, 1, 7)), eof(6, 1, 7, 6));
+        assert_stream_eq!("function", token(Function, (0, 1, 1), (7, 1, 8)), eof(7, 1, 8, 7));
+        assert_stream_eq!("if", token(If, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2, 1));
+        assert_stream_eq!("in", token(In, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2, 1));
+        assert_stream_eq!("instanceof", token(Instanceof, (0, 1, 1), (9, 1, 10)), eof(9, 1, 10, 9));
+        assert_stream_eq!("__LINE__", token(Line, (0, 1, 1), (7, 1, 8)), eof(7, 1, 8, 7));
+        assert_stream_eq!("local", token(Local, (0, 1, 1), (4, 1, 5)), eof(4, 1, 5, 4));
+        assert_stream_eq!("null", token(Null, (0, 1, 1), (3, 1, 4)), eof(3, 1, 4, 3));
+        assert_stream_eq!("rawcall", token(Rawcall, (0, 1, 1), (6, 1, 7)), eof(6, 1, 7, 6));
+        assert_stream_eq!("resume", token(Resume, (0, 1, 1), (5, 1, 6)), eof(5, 1, 6, 5));
+        assert_stream_eq!("return", token(Return, (0, 1, 1), (5, 1, 6)), eof(5, 1, 6, 5));
+        assert_stream_eq!("static", token(Static, (0, 1, 1), (5, 1, 6)), eof(5, 1, 6, 5));
+        assert_stream_eq!("switch", token(Switch, (0, 1, 1), (5, 1, 6)), eof(5, 1, 6, 5));
+        assert_stream_eq!("this", token(This, (0, 1, 1), (3, 1, 4)), eof(3, 1, 4, 3));
+        assert_stream_eq!("throw", token(Throw, (0, 1, 1), (4, 1, 5)), eof(4, 1, 5, 4));
+        assert_stream_eq!("true", token(True, (0, 1, 1), (3, 1, 4)), eof(3, 1, 4, 3));
+        assert_stream_eq!("try", token(Try, (0, 1, 1), (2, 1, 3)), eof(2, 1, 3, 2));
+        assert_stream_eq!("typeof", token(Typeof, (0, 1, 1), (5, 1, 6)), eof(5, 1, 6, 5));
+        assert_stream_eq!("while", token(While, (0, 1, 1), (4, 1, 5)), eof(4, 1, 5, 4));
+        assert_stream_eq!("yield", token(Yield, (0, 1, 1), (4, 1, 5)), eof(4, 1, 5, 4));
     }
 
     #[test]
+    #[rustfmt::skip]
     fn symbols() {
-        assert_stream_eq!("+", token(Plus, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
-        assert_stream_eq!("+=", token(PlusEq, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
-        assert_stream_eq!("++", token(PlusPlus, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
-        assert_stream_eq!("-", token(Minus, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
-        assert_stream_eq!("-=", token(MinusEq, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
-        assert_stream_eq!("--", token(MinusMinus, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
-        assert_stream_eq!("*", token(Mult, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
-        assert_stream_eq!("*=", token(MultEq, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
-        assert_stream_eq!("/", token(Div, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
-        assert_stream_eq!("/=", token(DivEq, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
-        assert_stream_eq!("%", token(Mod, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
-        assert_stream_eq!("%=", token(ModEq, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
+        assert_stream_eq!("+", token(Plus, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1, 0));
+        assert_stream_eq!("+=", token(PlusEq, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2, 1));
+        assert_stream_eq!("++", token(PlusPlus, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2, 1));
+        assert_stream_eq!("-", token(Minus, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1, 0));
+        assert_stream_eq!("-=", token(MinusEq, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2, 1));
+        assert_stream_eq!("--", token(MinusMinus, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2, 1));
+        assert_stream_eq!("*", token(Mult, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1, 0));
+        assert_stream_eq!("*=", token(MultEq, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2, 1));
+        assert_stream_eq!("/", token(Div, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1, 0));
+        assert_stream_eq!("/=", token(DivEq, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2, 1));
+        assert_stream_eq!("%", token(Mod, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1, 0));
+        assert_stream_eq!("%=", token(ModEq, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2, 1));
 
-        assert_stream_eq!("&", token(BitAnd, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
-        assert_stream_eq!("|", token(BitOr, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
-        assert_stream_eq!("^", token(BitXor, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
-        assert_stream_eq!("~", token(BitNot, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
+        assert_stream_eq!("&", token(BitAnd, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1, 0));
+        assert_stream_eq!("|", token(BitOr, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1, 0));
+        assert_stream_eq!("^", token(BitXor, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1, 0));
+        assert_stream_eq!("~", token(BitNot, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1, 0));
 
-        assert_stream_eq!("&&", token(And, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
-        assert_stream_eq!("||", token(Or, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
-        assert_stream_eq!("!", token(Not, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
+        assert_stream_eq!("&&", token(And, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2, 1));
+        assert_stream_eq!("||", token(Or, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2, 1));
+        assert_stream_eq!("!", token(Not, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1, 0));
 
-        assert_stream_eq!("<<", token(ShiftLeft, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
-        assert_stream_eq!(">>", token(ShiftRight, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
-        assert_stream_eq!(
-            ">>>",
-            token(UShiftRight, (0, 1, 1), (2, 1, 3)),
-            eof(2, 1, 3)
-        );
+        assert_stream_eq!("<<", token(ShiftLeft, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2, 1));
+        assert_stream_eq!(">>", token(ShiftRight, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2, 1));
+        assert_stream_eq!(">>>", token(UShiftRight, (0, 1, 1), (2, 1, 3)), eof(2, 1, 3, 2));
 
-        assert_stream_eq!("<", token(Lt, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
-        assert_stream_eq!("<=", token(Le, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
-        assert_stream_eq!(">", token(Gt, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
-        assert_stream_eq!(">=", token(Ge, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
-        assert_stream_eq!("==", token(EqEq, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
-        assert_stream_eq!("!=", token(Ne, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
-        assert_stream_eq!("<=>", token(Spaceship, (0, 1, 1), (2, 1, 3)), eof(2, 1, 3));
+        assert_stream_eq!("<", token(Lt, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1, 0));
+        assert_stream_eq!("<=", token(Le, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2, 1));
+        assert_stream_eq!(">", token(Gt, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1, 0));
+        assert_stream_eq!(">=", token(Ge, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2, 1));
+        assert_stream_eq!("==", token(EqEq, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2, 1));
+        assert_stream_eq!("!=", token(Ne, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2, 1));
+        assert_stream_eq!("<=>", token(Spaceship, (0, 1, 1), (2, 1, 3)), eof(2, 1, 3, 2));
 
-        assert_stream_eq!("=", token(Eq, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
-        assert_stream_eq!("<-", token(Newslot, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
-        assert_stream_eq!(",", token(Comma, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
-        assert_stream_eq!("?", token(Question, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
+        assert_stream_eq!("=", token(Eq, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1, 0));
+        assert_stream_eq!("<-", token(Newslot, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2, 1));
+        assert_stream_eq!(",", token(Comma, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1, 0));
+        assert_stream_eq!("?", token(Question, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1, 0));
 
-        assert_stream_eq!("(", token(ParenOpen, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
-        assert_stream_eq!(")", token(ParenClose, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
-        assert_stream_eq!("[", token(SquareOpen, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
-        assert_stream_eq!("]", token(SquareClose, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
-        assert_stream_eq!("{", token(BraceOpen, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
-        assert_stream_eq!("}", token(BraceClose, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
-        assert_stream_eq!("</", token(AttrOpen, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
-        assert_stream_eq!("/>", token(AttrClose, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
-        assert_stream_eq!(".", token(Dot, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
-        assert_stream_eq!("...", token(DotDotDot, (0, 1, 1), (2, 1, 3)), eof(2, 1, 3));
-        assert_stream_eq!(":", token(Colon, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
-        assert_stream_eq!(";", token(Semicolon, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
-        assert_stream_eq!("::", token(Scope, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2));
-        assert_stream_eq!("@", token(At, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1));
+        assert_stream_eq!("(", token(ParenOpen, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1, 0));
+        assert_stream_eq!(")", token(ParenClose, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1, 0));
+        assert_stream_eq!("[", token(SquareOpen, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1, 0));
+        assert_stream_eq!("]", token(SquareClose, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1, 0));
+        assert_stream_eq!("{", token(BraceOpen, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1, 0));
+        assert_stream_eq!("}", token(BraceClose, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1, 0));
+        assert_stream_eq!("</", token(AttrOpen, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2, 1));
+        assert_stream_eq!("/>", token(AttrClose, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2, 1));
+        assert_stream_eq!(".", token(Dot, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1, 0));
+        assert_stream_eq!("...", token(DotDotDot, (0, 1, 1), (2, 1, 3)), eof(2, 1, 3, 2));
+        assert_stream_eq!(":", token(Colon, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1, 0));
+        assert_stream_eq!(";", token(Semicolon, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1, 0));
+        assert_stream_eq!("::", token(Scope, (0, 1, 1), (1, 1, 2)), eof(1, 1, 2, 1));
+        assert_stream_eq!("@", token(At, (0, 1, 1), (0, 1, 1)), eof(0, 1, 1, 0));
     }
 
     #[test]
@@ -816,7 +820,7 @@ mod tests {
         assert_stream_eq!(
             "ä",
             error(UnexpectedChar('ä'), (0, 1, 1), (1, 1, 1)),
-            eof(0, 1, 1)
+            eof(0, 1, 1, 1)
         );
         assert_stream_eq!(
             "ä松🐿",
@@ -826,7 +830,7 @@ mod tests {
             error(UnexpectedChar('松'), (2, 1, 2), (4, 1, 2)),
             // 4 bytes
             error(UnexpectedChar('🐿'), (5, 1, 3), (8, 1, 3)),
-            eof(5, 1, 3)
+            eof(5, 1, 3, 8)
         );
     }
 
@@ -835,7 +839,7 @@ mod tests {
         assert_stream_eq!(
             "..",
             error(InvalidToken("..".into()), (0, 1, 1), (1, 1, 2)),
-            eof(1, 1, 2)
+            eof(1, 1, 2, 1)
         );
     }
 }
